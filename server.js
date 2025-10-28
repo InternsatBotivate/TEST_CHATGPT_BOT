@@ -1,121 +1,127 @@
-// server.js — Final Vercel-Compatible Version
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import fs from "fs";
 import { refreshSchema } from "./refreshSchema.js";
-
-app.get("/ai/refresh", async (req, res) => {
-  try {
-    const newSchema = await refreshSchema();
-    res.json({ success: true, columns: newSchema.length });
-  } catch (err) {
-    console.error("Error refreshing schema:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 
-// -------------- ENVIRONMENT ----------------
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-if (!supabaseUrl || !supabaseKey)
-  throw new Error("❌ Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
-// -------------- SCHEMA LOADING ----------------
-let schemaCache = "";
-async function refreshSchema() {
-  const { data, error } = await supabase.rpc("get_schema_overview");
-  if (error) throw error;
-  schemaCache = data
-    .map((r) => `${r.table_name}(${r.column_name}:${r.data_type})`)
-    .join(", ");
-  console.log(`📄 Schema loaded (${data.length} columns)`);
-}
+// 🧩 Helper: Load schema dynamically (always fresh)
+let schema = null;
+const loadSchema = () => {
+  try {
+    if (fs.existsSync("./schema.json")) {
+      schema = JSON.parse(fs.readFileSync("./schema.json", "utf8"));
+      console.log("✅ Loaded schema.json successfully.");
+    } else {
+      console.warn("⚠️ schema.json not found, run /ai/refresh to create it.");
+      schema = [];
+    }
+  } catch (err) {
+    console.error("❌ Failed to load schema:", err);
+    schema = [];
+  }
+};
 
-// -------------- PROMPT TEMPLATE ----------------
-function buildPrompt(question) {
-  return `
-You are an AI expert in writing PostgreSQL queries.
+// Load schema at startup
+loadSchema();
 
-⚠️ Rules:
-1. Always wrap table and column names containing uppercase letters or underscores in double quotes ("").
-2. Only generate SELECT statements; no INSERT, UPDATE, or DELETE.
-3. Use these mappings:
-   - "purchase order", "pending PO", "PO pending" → "PO_Pending"
-   - "purchase receipt" → "Purchase_Receipt"
-   - "tasks", "checklist" → "Checklist"
-   - "delegation" → "Delegation"
-   - "store out" → "Store_OUT"
-   - "store in" → "Store_IN"
-   - "souda", "sauda" → "Souda"
-   - "invoice" → "INVOICE"
-   - "employee", "staff" → "Active_Employee_Details"
-4. When filtering pending data, prefer columns like "Qty", "Lead_Time_To_Lift_Total_Qty", "ERP_Po_Number".
-5. Use the schema to guide valid table/column names.
-6. Never invent columns or run non-SELECT queries.
-
-Schema:
-${schemaCache}
-
-User question: "${question}"
-
-Return only SQL code, nothing else.
-`;
-}
-
-// -------------- /ai/query ENDPOINT ----------------
+// 🧠 POST /ai/query — Natural Language → SQL → Run → Return
 app.post("/ai/query", async (req, res) => {
   try {
     const { question } = req.body;
-    if (!question) return res.status(400).json({ error: "Missing question" });
+    if (!question)
+      return res.status(400).json({ error: "Missing 'question' parameter" });
 
-    const chat = await openai.chat.completions.create({
+    const systemPrompt = `
+You are an AI expert in writing PostgreSQL queries.
+
+Rules:
+1. Only generate SELECT statements; no inserts, updates, or deletes.
+2. Wrap table and column names with uppercase letters or underscores in double quotes ("").
+3. Use the following mappings:
+   - "purchase order", "PO pending", or "pending PO" → table "PO_Pending"
+   - "purchase receipt" → table "Purchase_Receipt"
+   - "tasks" or "checklist" → table "Checklist"
+   - "delegation" → table "Delegation"
+   - "store out" → table "Store_OUT"
+   - "store in" → table "Store_IN"
+   - "souda" or "sauda" → table "Souda"
+   - "invoice" → table "INVOICE"
+   - "employee" or "staff" → table "Active_Employee_Details"
+4. Add WHERE or LIMIT clauses if the query is about "pending", "latest", or "summary".
+5. Schema (table_name, column_name, data_type):
+${JSON.stringify(schema, null, 2)}
+User question: "${question}"
+Return only SQL code, no explanations.
+    `;
+
+    // 💬 Generate SQL
+    const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You generate SQL for Supabase PostgreSQL safely." },
-        { role: "user", content: buildPrompt(question) },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: question },
       ],
     });
 
-    let sql = chat.choices[0].message.content.trim();
-    const cleaned = sql.replace(/```sql|```/g, "").trim();
-
-    if (!/^select/i.test(cleaned))
+    let sql = response.choices[0].message.content.trim();
+    sql = sql.replace(/```sql|```/g, "").trim();
+    if (!sql.toLowerCase().startsWith("select"))
       throw new Error("Only SELECT queries are allowed");
 
-    const { data: rows, error: runErr } = await supabase.rpc("run_sql", { sql: cleaned });
-    if (runErr) throw runErr;
+    // ⚙️ Run query in Supabase
+    const { data, error } = await supabase.rpc("run_sql", { query_text: sql });
+    if (error) throw error;
 
     res.json({
-      summary: `Fetched ${rows?.length || 0} rows for "${question}"`,
-      sql: cleaned,
-      table: rows?.slice(0, 20) || [],
+      summary: `Fetched ${data?.length || 0} rows for "${question}"`,
+      sql,
+      table: data,
     });
   } catch (err) {
-    console.error("❌", err);
+    console.error("❌ Query error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// -------------- ROOT ----------------
-app.get("/", (_, res) => {
+// 🔁 GET /ai/refresh — Reload latest Supabase schema
+app.get("/ai/refresh", async (req, res) => {
+  try {
+    console.log("🔄 Refreshing Supabase schema...");
+    const result = await refreshSchema();
+    loadSchema();
+    res.json({
+      success: true,
+      message: "Schema refreshed successfully.",
+      columns: result?.length || 0,
+    });
+  } catch (error) {
+    console.error("❌ Schema refresh failed:", error);
+    res.status(500).json({
+      error: "Schema refresh failed",
+      details: error.message || error.toString(),
+    });
+  }
+});
+
+// 🟢 Default route
+app.get("/", (req, res) => {
   res.send("✅ Business Bot API is live. POST /ai/query with { question: '...' }");
 });
 
-// -------------- EXPORT FOR VERCEL ----------------
-await refreshSchema();
-if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 4000;
-  app.listen(PORT, () => console.log(`✅ Local server running on port ${PORT}`));
-}
 export default app;

@@ -1,39 +1,19 @@
-import fetch from "node-fetch";
 import fs from "fs";
 import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 dotenv.config();
 
-const { SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env;
+export async function refreshSchema() {
+  const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
 
-// 🚫 Note: No semicolon at the end of the query string
-const query = `
-  select table_name, column_name, data_type
-  from information_schema.columns
-  where table_schema='public'
-  order by table_name, ordinal_position
-`;
+  // You can replace this RPC if your schema function name differs
+  const { data, error } = await supabase.rpc("get_schema");
+  if (error) throw error;
 
-const refreshSchema = async () => {
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/exec_sql`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_SERVICE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ sql: query })
-    });
-
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
-
-    // Save schema to JSON
-    fs.writeFileSync("./schema.json", JSON.stringify(data, null, 2));
-    console.log("✅ Schema refreshed at", new Date().toISOString());
-  } catch (err) {
-    console.error("❌ Error refreshing schema:", err.message);
-  }
-};
-
-refreshSchema();
+  fs.writeFileSync("./schema.json", JSON.stringify(data, null, 2));
+  console.log(`✅ schema.json updated with ${data.length} columns`);
+  return data;
+}
