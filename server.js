@@ -94,6 +94,13 @@ You are an AI expert in writing PostgreSQL queries.
    - When the user says "souda" or "sauda" → use table "Souda"
    - When the user says "invoice" → use table "INVOICE"
    - When the user says "employee" or "staff" → use table "Active_Employee_Details"
+   - When the user says "purchase order", "pending po", or "po pending" → use table "PO_Pending".
+   There is **no** "status" column here.
+   Use filters based on available columns like:
+    - "Qty" (e.g., Qty > 0 means pending)
+    - "Lead_Time_To_Lift_Total_Qty" if comparing delivery progress
+    - or "ERP_Po_Number" for specific order identification.
+
 
 4. Each table has columns relevant to its category, which can be seen in the schema below. 
 5. Do not invent table or column names not listed in the schema.
