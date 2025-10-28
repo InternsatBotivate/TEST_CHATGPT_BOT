@@ -1,0 +1,44 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files (API keys, Supabase credentials, etc.)
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+*.out
+*.pid
+*.seed
+
+# Build artifacts and temporary files
+dist/
+build/
+.cache/
+.tmp/
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local databases / backups
+*.sqlite
+*.db
+*.bak
+
+# OS metadata
+.idea/
+.vscode/
+*.swp
+
+# Generated charts and schema
+charts/
+schema.json
+
+# Optional: exclude ngrok or deployment configs
+ngrok.yml
