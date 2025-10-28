@@ -4,12 +4,17 @@ import dotenv from "dotenv";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { refreshSchema } from "./refreshSchema.js";
 
 dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -20,27 +25,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// 🧩 Helper: Load schema dynamically (always fresh)
-let schema = null;
+// 🧩 Load schema dynamically
+let schema = [];
 const loadSchema = () => {
   try {
-    if (fs.existsSync("./schema.json")) {
-      schema = JSON.parse(fs.readFileSync("./schema.json", "utf8"));
-      console.log("✅ Loaded schema.json successfully.");
+    const schemaPath = path.join(__dirname, "schema.json");
+    if (fs.existsSync(schemaPath)) {
+      schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+      console.log(`✅ Schema loaded with ${schema.length} columns`);
     } else {
-      console.warn("⚠️ schema.json not found, run /ai/refresh to create it.");
-      schema = [];
+      console.warn("⚠️ schema.json not found. Run /ai/refresh to generate.");
     }
   } catch (err) {
-    console.error("❌ Failed to load schema:", err);
-    schema = [];
+    console.error("❌ Error loading schema:", err);
   }
 };
-
-// Load schema at startup
 loadSchema();
 
-// 🧠 POST /ai/query — Natural Language → SQL → Run → Return
+// 🧠 POST /ai/query — generate & run SQL
 app.post("/ai/query", async (req, res) => {
   try {
     const { question } = req.body;
@@ -54,16 +56,16 @@ Rules:
 1. Only generate SELECT statements; no inserts, updates, or deletes.
 2. Wrap table and column names with uppercase letters or underscores in double quotes ("").
 3. Use the following mappings:
-   - "purchase order", "PO pending", or "pending PO" → table "PO_Pending"
-   - "purchase receipt" → table "Purchase_Receipt"
-   - "tasks" or "checklist" → table "Checklist"
-   - "delegation" → table "Delegation"
-   - "store out" → table "Store_OUT"
-   - "store in" → table "Store_IN"
-   - "souda" or "sauda" → table "Souda"
-   - "invoice" → table "INVOICE"
-   - "employee" or "staff" → table "Active_Employee_Details"
-4. Add WHERE or LIMIT clauses if the query is about "pending", "latest", or "summary".
+   - "purchase order", "PO pending", or "pending PO" → "PO_Pending"
+   - "purchase receipt" → "Purchase_Receipt"
+   - "tasks" or "checklist" → "Checklist"
+   - "delegation" → "Delegation"
+   - "store out" → "Store_OUT"
+   - "store in" → "Store_IN"
+   - "souda" or "sauda" → "Souda"
+   - "invoice" → "INVOICE"
+   - "employee" or "staff" → "Active_Employee_Details"
+4. Add WHERE or LIMIT clauses if the question mentions "pending", "latest", or "summary".
 5. Schema (table_name, column_name, data_type):
 ${JSON.stringify(schema, null, 2)}
 User question: "${question}"
@@ -82,9 +84,9 @@ Return only SQL code, no explanations.
     let sql = response.choices[0].message.content.trim();
     sql = sql.replace(/```sql|```/g, "").trim();
     if (!sql.toLowerCase().startsWith("select"))
-      throw new Error("Only SELECT queries are allowed");
+      throw new Error("Only SELECT queries are allowed.");
 
-    // ⚙️ Run query in Supabase
+    // ⚙️ Execute query via Supabase RPC
     const { data, error } = await supabase.rpc("run_sql", { query_text: sql });
     if (error) throw error;
 
@@ -99,7 +101,7 @@ Return only SQL code, no explanations.
   }
 });
 
-// 🔁 GET /ai/refresh — Reload latest Supabase schema
+// 🔁 GET /ai/refresh — reload schema
 app.get("/ai/refresh", async (req, res) => {
   try {
     console.log("🔄 Refreshing Supabase schema...");
@@ -119,9 +121,25 @@ app.get("/ai/refresh", async (req, res) => {
   }
 });
 
-// 🟢 Default route
+// 🧾 GET /openapi.json — serve OpenAPI schema
+app.get("/openapi.json", (req, res) => {
+  const openapiPath = path.join(__dirname, "openapi.json");
+  try {
+    const spec = fs.readFileSync(openapiPath, "utf8");
+    res.setHeader("Content-Type", "application/json");
+    res.send(spec);
+  } catch (err) {
+    console.error("❌ Failed to load openapi.json:", err);
+    res.status(500).json({ error: "Cannot load openapi.json" });
+  }
+});
+
+// 🩵 Health check
 app.get("/", (req, res) => {
-  res.send("✅ Business Bot API is live. POST /ai/query with { question: '...' }");
+  res.json({
+    message:
+      "✅ Business Bot API is live. POST /ai/query with { question: '...' }",
+  });
 });
 
 export default app;
