@@ -79,14 +79,33 @@ app.post("/ai/query", async (req, res) => {
   try {
     const prompt = `
 You are an AI expert in writing PostgreSQL queries.
-⚠️ Always wrap table and column names with double quotes ("").
-Use this schema to write a safe, read-only PostgreSQL SELECT query.
+
+⚠️ Rules:
+1. Always wrap table and column names that contain uppercase letters or underscores in double quotes ("").
+2. Only generate SELECT statements; no inserts, updates, or deletes.
+3. Use the following table mappings when generating queries:
+
+   - When the user says "purchase order", "PO pending", or "pending PO" → use table "PO_Pending"
+   - When the user says "purchase receipt" → use table "Purchase_Receipt"
+   - When the user says "tasks" or "checklist" → use table "Checklist"
+   - When the user says "delegation" → use table "Delegation"
+   - When the user says "store out" → use table "Store_OUT"
+   - When the user says "store in" → use table "Store_IN"
+   - When the user says "souda" or "sauda" → use table "Souda"
+   - When the user says "invoice" → use table "INVOICE"
+   - When the user says "employee" or "staff" → use table "Active_Employee_Details"
+
+4. Each table has columns relevant to its category, which can be seen in the schema below. 
+5. Do not invent table or column names not listed in the schema.
+6. Always include WHERE filters or LIMIT clauses when the question suggests summarising, pending, or latest data.
+
 Schema (table_name, column_name, data_type):
 ${JSON.stringify(schema, null, 2)}
 
 User question: "${question}"
 Return only SQL code, no explanations.
-    `;
+`;
+
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
