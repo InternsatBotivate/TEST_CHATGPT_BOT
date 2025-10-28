@@ -78,7 +78,7 @@ app.post("/ai/query", async (req, res) => {
       return res.status(400).json({ error: "Only SELECT queries are allowed" });
     }
 
-    const { data, error } = await supabase.rpc("run_sql", { sql_text: sql });
+    const { data, error } = await supabase.from("PO_Pending").select("*").limit(10);
 
     if (error) throw error;
 
