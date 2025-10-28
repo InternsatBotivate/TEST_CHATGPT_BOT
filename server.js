@@ -1,96 +1,69 @@
-// ---------- server.js ----------
-import "dotenv/config";
 import express from "express";
-import bodyParser from "body-parser";
-import cors from "cors";
-import fs from "fs";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import "dotenv/config";
 
-// ---------- Load Schema ----------
-const schema = JSON.parse(fs.readFileSync("./schema.json", "utf-8"));
+const app = express();
+app.use(express.json());
 
-// ---------- Initialize Clients ----------
+// 🔗 Supabase connection
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// 🧠 OpenAI setup
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+// ⚙️ Function to fetch *live* schema from Supabase
+async function getLiveSchema() {
+  console.log("🔍 Fetching latest schema...");
+  const { data, error } = await supabase.rpc("get_schema_structure");
+  if (error) {
+    console.error("⚠️ Schema fetch error:", error.message);
+    throw error;
+  }
+  console.log("✅ Schema fetched:", data?.length || 0, "tables");
+  return data;
+}
 
-// ---------- Health Check ----------
-app.get("/", (req, res) => {
-  res.send("✅ Business Bot API is live. POST /ai/query with { question: '...' }");
-});
+// 🧩 POST endpoint
+app.post("/ai/query", async (req, res) => {
+  const { question } = req.body;
 
-// ---------- OpenAI SQL Generator ----------
-async function generateSQL(question, schema) {
-  const prompt = `
+  try {
+    // fetch the most current schema
+    const schema = await getLiveSchema();
+
+    const systemPrompt = `
 You are an AI expert in writing PostgreSQL queries.
 
 ⚠️ Rules:
-1. Only generate **SELECT** statements.
-2. Always wrap table or column names with uppercase letters or underscores in double quotes ("").
-3. Map terms to tables:
-   - "purchase order", "PO pending", "pending PO" → "PO_Pending"
-   - "purchase receipt" → "Purchase_Receipt"
-   - "tasks", "checklist" → "Checklist"
-   - "delegation" → "Delegation"
-   - "store out" → "Store_OUT"
-   - "store in" → "Store_IN"
-   - "souda" or "sauda" → "Souda"
-   - "invoice" → "INVOICE"
-   - "employee" or "staff" → "Active_Employee_Details"
-   ("PO_Pending" has no "status" column — use "Qty > 0" for pending.)
-4. Use filters (WHERE, LIMIT) when the question implies "pending", "latest", or "summary".
-5. Do NOT invent tables or columns not in the schema.
+1. Always wrap table and column names containing uppercase letters or underscores in double quotes ("").
+2. Only generate SELECT statements — never modify data.
+3. Use the live schema below to construct accurate queries.
+4. Never invent table or column names.
 
-Schema (table_name, column_name, data_type):
+Schema:
 ${JSON.stringify(schema, null, 2)}
 
 User question: "${question}"
-Return only SQL code, no explanation.
+
+Return only valid SQL code.
 `;
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-  });
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: systemPrompt }],
+    });
 
-  let sql = completion.choices[0].message.content.trim();
-  sql = sql.replace(/```sql/g, "").replace(/```/g, "").trim();
-  return sql;
-}
-
-// ---------- /ai/query Endpoint ----------
-app.post("/ai/query", async (req, res) => {
-  try {
-    const { question } = req.body;
-    if (!question) return res.status(400).json({ error: "Question is required." });
-
-    const sql = await generateSQL(question, schema);
-    console.log("🧠 SQL Generated:\n", sql);
-
-    // ✅ Safety check
-    if (!/^SELECT\s+/i.test(sql)) {
-      return res.status(400).json({ error: "Only SELECT queries are allowed" });
-    }
-
-    // Execute SQL through Supabase RPC
-    const { data, error } = await supabase.rpc("run_sql", { sql_text: sql });
-
-    if (error) throw error;
+    const sql = completion.choices[0].message.content.trim();
 
     res.json({
-      summary: `Fetched ${data?.length || 0} rows.`,
+      summary: `Generated query for: ${question}`,
       sql,
-      table: data,
     });
   } catch (err) {
     console.error("❌ Error:", err);
@@ -98,8 +71,7 @@ app.post("/ai/query", async (req, res) => {
   }
 });
 
-// ---------- Start Server ----------
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+// 🟢 Start the server
+app.listen(process.env.PORT || 4000, () =>
+  console.log(`✅ Business Bot API running on port ${process.env.PORT || 4000}`)
+);
