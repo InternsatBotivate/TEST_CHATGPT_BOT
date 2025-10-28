@@ -16,27 +16,30 @@ app.use(express.json());
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const { SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env;
 
-// --- File handling ---
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-app.use("/charts", express.static(path.join(__dirname, "charts")));
-if (!fs.existsSync(path.join(__dirname, "charts"))) fs.mkdirSync(path.join(__dirname, "charts"));
+// --- Set up writable chart directory ---
+const chartDir = "/tmp/charts"; // ✅ /tmp is writable on Vercel
+if (!fs.existsSync(chartDir)) fs.mkdirSync(chartDir, { recursive: true });
+app.use("/charts", express.static(chartDir));
 
 // --- Schema caching ---
 let schema = {};
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const loadSchema = () => {
   try {
     schema = JSON.parse(fs.readFileSync("./schema.json", "utf8"));
     console.log("📄 Schema loaded with", schema.length, "columns");
   } catch {
-    console.warn("⚠️ No schema.json found yet");
+    console.warn("⚠️ No schema.json found yet or invalid");
   }
 };
 loadSchema();
 fs.watchFile("./schema.json", loadSchema);
 
-// --- Chart generation helper ---
+// --- Chart generator ---
 async function generateChart(data) {
   if (!Array.isArray(data) || data.length === 0) return null;
+
   const sample = data[0];
   const keys = Object.keys(sample);
   const numericKeys = keys.filter(k => typeof sample[k] === "number");
@@ -50,31 +53,33 @@ async function generateChart(data) {
     type: "bar",
     data: {
       labels: data.map(r => r[labelKey]),
-      datasets: [{
-        label: valueKey,
-        data: data.map(r => r[valueKey]),
-        backgroundColor: "rgba(54,162,235,0.6)"
-      }]
+      datasets: [
+        {
+          label: valueKey,
+          data: data.map(r => r[valueKey]),
+          backgroundColor: "rgba(54,162,235,0.6)"
+        }
+      ]
     },
     options: { responsive: false }
   };
+
   const buffer = await chartJSNodeCanvas.renderToBuffer(config);
   const fileName = `chart_${Date.now()}.png`;
-  const filePath = path.join(__dirname, "charts", fileName);
+  const filePath = path.join(chartDir, fileName);
   fs.writeFileSync(filePath, buffer);
   return `/charts/${fileName}`;
 }
 
-// --- Core endpoint ---
+// --- Core AI Query Endpoint ---
 app.post("/ai/query", async (req, res) => {
   const { question } = req.body;
   if (!question) return res.status(400).json({ error: "Missing question" });
 
   try {
-    // 1️⃣ Build prompt with schema context
     const prompt = `
 You are an AI expert in writing PostgreSQL queries.
-⚠️ Always wrap table and column names in double quotes ("") because this database uses uppercase and underscores.
+⚠️ Always wrap table and column names with double quotes ("").
 Use this schema to write a safe, read-only PostgreSQL SELECT query.
 Schema (table_name, column_name, data_type):
 ${JSON.stringify(schema, null, 2)}
@@ -83,7 +88,6 @@ User question: "${question}"
 Return only SQL code, no explanations.
     `;
 
-    // 2️⃣ Ask OpenAI for SQL
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
@@ -91,18 +95,15 @@ Return only SQL code, no explanations.
     });
 
     let sql = completion.choices[0].message.content.trim();
-
-    // 3️⃣ Clean up markdown & semicolons
     sql = sql.replace(/```sql|```/gi, "").trim();
     sql = sql.replace(/;+\s*$/, "").trim();
 
     console.log("🧠 Cleaned SQL:\n", sql);
 
-    // 4️⃣ Validate basic safety
     if (!/^select/i.test(sql))
       throw new Error("Unsafe or invalid query generated");
 
-    // 5️⃣ Execute on Supabase
+    // --- Execute query on Supabase ---
     const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/exec_sql`, {
       method: "POST",
       headers: {
@@ -117,7 +118,7 @@ Return only SQL code, no explanations.
     if (!rpcRes.ok) throw new Error(JSON.stringify(data));
     console.log(`📊 Returned ${data.length} rows`);
 
-    // 6️⃣ Generate chart
+    // --- Generate chart ---
     const chartURL = await generateChart(data);
 
     res.json({
