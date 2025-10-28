@@ -1,4 +1,4 @@
-// server.js — final Vercel-compatible version
+// server.js — Final Vercel-Compatible Version
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
@@ -22,11 +22,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // -------------- SCHEMA LOADING ----------------
 let schemaCache = "";
 async function refreshSchema() {
-  const { data, error } = await supabase
-    .from("information_schema.columns")
-    .select("table_name,column_name,data_type")
-    .eq("table_schema", "public");
-
+  const { data, error } = await supabase.rpc("get_schema_overview");
   if (error) throw error;
   schemaCache = data
     .map((r) => `${r.table_name}(${r.column_name}:${r.data_type})`)
@@ -71,7 +67,6 @@ app.post("/ai/query", async (req, res) => {
     const { question } = req.body;
     if (!question) return res.status(400).json({ error: "Missing question" });
 
-    // generate SQL via OpenAI
     const chat = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -86,7 +81,6 @@ app.post("/ai/query", async (req, res) => {
     if (!/^select/i.test(cleaned))
       throw new Error("Only SELECT queries are allowed");
 
-    // run through Supabase RPC
     const { data: rows, error: runErr } = await supabase.rpc("run_sql", { sql: cleaned });
     if (runErr) throw runErr;
 
