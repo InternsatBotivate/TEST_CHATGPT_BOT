@@ -1,83 +1,36 @@
+// server.js
 import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import fs from "fs";
-import fetch from "node-fetch";
+import bodyParser from "body-parser";
 import OpenAI from "openai";
-import { ChartJSNodeCanvas } from "chartjs-node-canvas";
+import { createClient } from "@supabase/supabase-js";
+import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 
-dotenv.config();
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const { SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env;
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-// --- Set up writable chart directory ---
-const chartDir = "/tmp/charts"; // ✅ /tmp is writable on Vercel
-if (!fs.existsSync(chartDir)) fs.mkdirSync(chartDir, { recursive: true });
-app.use("/charts", express.static(chartDir));
+const schemaPath = path.resolve("schema.json");
+let schema = fs.existsSync(schemaPath)
+  ? fs.readFileSync(schemaPath, "utf8")
+  : "Schema not found.";
 
-// --- Schema caching ---
-let schema = {};
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// simple home route
+app.get("/", (req, res) => {
+  res.send("✅ Business Bot API is live. POST /ai/query with { question: '...' }");
+});
 
-const loadSchema = () => {
-  try {
-    schema = JSON.parse(fs.readFileSync("./schema.json", "utf8"));
-    console.log("📄 Schema loaded with", schema.length, "columns");
-  } catch {
-    console.warn("⚠️ No schema.json found yet or invalid");
-  }
-};
-loadSchema();
-fs.watchFile("./schema.json", loadSchema);
-
-// --- Chart generator ---
-async function generateChart(data) {
-  if (!Array.isArray(data) || data.length === 0) return null;
-
-  const sample = data[0];
-  const keys = Object.keys(sample);
-  const numericKeys = keys.filter(k => typeof sample[k] === "number");
-  const labelKey = keys.find(k => !numericKeys.includes(k)) || keys[0];
-  const valueKey = numericKeys[0];
-  if (!valueKey) return null;
-
-  const width = 800, height = 450;
-  const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height });
-  const config = {
-    type: "bar",
-    data: {
-      labels: data.map(r => r[labelKey]),
-      datasets: [
-        {
-          label: valueKey,
-          data: data.map(r => r[valueKey]),
-          backgroundColor: "rgba(54,162,235,0.6)"
-        }
-      ]
-    },
-    options: { responsive: false }
-  };
-
-  const buffer = await chartJSNodeCanvas.renderToBuffer(config);
-  const fileName = `chart_${Date.now()}.png`;
-  const filePath = path.join(chartDir, fileName);
-  fs.writeFileSync(filePath, buffer);
-  return `/charts/${fileName}`;
-}
-
-// --- Core AI Query Endpoint ---
 app.post("/ai/query", async (req, res) => {
   const { question } = req.body;
-  if (!question) return res.status(400).json({ error: "Missing question" });
+  if (!question) return res.status(400).json({ error: "Question missing" });
 
   try {
-    const prompt = `
+    const systemPrompt = `
 You are an AI expert in writing PostgreSQL queries.
 
 ⚠️ Rules:
@@ -95,70 +48,71 @@ You are an AI expert in writing PostgreSQL queries.
    - When the user says "invoice" → use table "INVOICE"
    - When the user says "employee" or "staff" → use table "Active_Employee_Details"
    - When the user says "purchase order", "pending po", or "po pending" → use table "PO_Pending".
-   There is **no** "status" column here.
-   Use filters based on available columns like:
-    - "Qty" (e.g., Qty > 0 means pending)
-    - "Lead_Time_To_Lift_Total_Qty" if comparing delivery progress
-    - or "ERP_Po_Number" for specific order identification.
+     There is **no** "status" column here.
+     Use filters based on available columns like:
+      • "Qty" (e.g., Qty > 0 means pending)
+      • "Lead_Time_To_Lift_Total_Qty" if comparing delivery progress
+      • or "ERP_Po_Number" for specific order identification.
 
-
-4. Each table has columns relevant to its category, which can be seen in the schema below. 
+4. Each table has columns relevant to its category, visible in the schema below.
 5. Do not invent table or column names not listed in the schema.
-6. Always include WHERE filters or LIMIT clauses when the question suggests summarising, pending, or latest data.
+6. Always include WHERE filters or LIMIT clauses when summarizing, pending, or latest data.
 
 Schema (table_name, column_name, data_type):
-${JSON.stringify(schema, null, 2)}
+${schema}
 
 User question: "${question}"
 Return only SQL code, no explanations.
 `;
 
-
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: question },
+      ],
     });
 
-    let sql = completion.choices[0].message.content.trim();
-    sql = sql.replace(/```sql|```/gi, "").trim();
-    sql = sql.replace(/;+\s*$/, "").trim();
+    const sql = completion.choices[0].message.content.trim();
+    console.log("🧠 SQL Generated:\n", sql);
 
-    console.log("🧠 Cleaned SQL:\n", sql);
+    if (!sql.toLowerCase().startsWith("select"))
+      throw new Error("Only SELECT queries are allowed");
 
-    if (!/^select/i.test(sql))
-      throw new Error("Unsafe or invalid query generated");
+    const { data, error } = await supabase.rpc("exec_sql", { sql });
+    if (error) throw error;
 
-    // --- Execute query on Supabase ---
-    const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/exec_sql`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_SERVICE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ sql })
-    });
+    // skip chart generation on vercel
+    let chartBase64 = null;
+    try {
+      if (!process.env.VERCEL) {
+        console.log("⚙️ Chart generation allowed locally");
+        const { ChartJSNodeCanvas } = await import("chartjs-node-canvas");
+        const chartJSNodeCanvas = new ChartJSNodeCanvas({ width: 800, height: 400 });
+        const chartBuffer = await chartJSNodeCanvas.renderToBuffer({
+          type: "bar",
+          data: {
+            labels: data.map((row, i) => row.Party_Name || `Row ${i + 1}`),
+            datasets: [{ label: "Qty", data: data.map((row) => row.Qty || 0) }],
+          },
+        });
+        chartBase64 = chartBuffer.toString("base64");
+      } else {
+        console.log("⛔ Chart skipped on Vercel (read-only fs)");
+      }
+    } catch (e) {
+      console.warn("Chart generation skipped:", e.message);
+    }
 
-    const data = await rpcRes.json();
-    if (!rpcRes.ok) throw new Error(JSON.stringify(data));
-    console.log(`📊 Returned ${data.length} rows`);
-
-    // --- Generate chart ---
-    const chartURL = await generateChart(data);
-
-    res.json({
-      summary: `Fetched ${data.length} rows.`,
-      sql,
-      table: data.slice(0, 50),
-      chart: chartURL ? `${req.protocol}://${req.get("host")}${chartURL}` : null
-    });
+    const summary = `Fetched ${data?.length || 0} rows.`;
+    res.json({ summary, sql, table: data, chart: chartBase64 });
   } catch (err) {
     console.error("❌ Error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message || "Internal Server Error" });
   }
 });
 
-// --- Start server ---
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
