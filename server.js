@@ -4,6 +4,18 @@ import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import { refreshSchema } from "./refreshSchema.js";
+
+app.get("/ai/refresh", async (req, res) => {
+  try {
+    const newSchema = await refreshSchema();
+    res.json({ success: true, columns: newSchema.length });
+  } catch (err) {
+    console.error("Error refreshing schema:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 dotenv.config();
 
