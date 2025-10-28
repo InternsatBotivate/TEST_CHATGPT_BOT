@@ -1,17 +1,19 @@
+// ---------- server.js ----------
+import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
-import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
 import fs from "fs";
+import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 
-// Load schema from local file
+// ---------- Load Schema ----------
 const schema = JSON.parse(fs.readFileSync("./schema.json", "utf-8"));
 
-// Initialize clients
+// ---------- Initialize Clients ----------
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // ✅ make sure this matches your Vercel env variable name
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 const openai = new OpenAI({
@@ -22,36 +24,38 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// 🧠 Root route (health check)
+// ---------- Health Check ----------
 app.get("/", (req, res) => {
   res.send("✅ Business Bot API is live. POST /ai/query with { question: '...' }");
 });
 
-// 🧩 Generate SQL query using OpenAI
+// ---------- OpenAI SQL Generator ----------
 async function generateSQL(question, schema) {
   const prompt = `
 You are an AI expert in writing PostgreSQL queries.
 
 ⚠️ Rules:
-1. Always wrap table and column names that contain uppercase letters or underscores in double quotes ("").
-2. Only generate SELECT statements; no inserts, updates, or deletes.
-3. Use the following table mappings when generating queries:
+1. Only generate **SELECT** statements.
+2. Always wrap table or column names with uppercase letters or underscores in double quotes ("").
+3. Map terms to tables:
    - "purchase order", "PO pending", "pending PO" → "PO_Pending"
    - "purchase receipt" → "Purchase_Receipt"
-   - "tasks" or "checklist" → "Checklist"
+   - "tasks", "checklist" → "Checklist"
    - "delegation" → "Delegation"
    - "store out" → "Store_OUT"
    - "store in" → "Store_IN"
    - "souda" or "sauda" → "Souda"
    - "invoice" → "INVOICE"
    - "employee" or "staff" → "Active_Employee_Details"
-   There is no "status" column in "PO_Pending"; use filters like "Qty > 0" for pending.
+   ("PO_Pending" has no "status" column — use "Qty > 0" for pending.)
+4. Use filters (WHERE, LIMIT) when the question implies "pending", "latest", or "summary".
+5. Do NOT invent tables or columns not in the schema.
 
 Schema (table_name, column_name, data_type):
 ${JSON.stringify(schema, null, 2)}
 
 User question: "${question}"
-Return only SQL code, no explanations.
+Return only SQL code, no explanation.
 `;
 
   const completion = await openai.chat.completions.create({
@@ -60,30 +64,31 @@ Return only SQL code, no explanations.
   });
 
   let sql = completion.choices[0].message.content.trim();
-  sql = sql.replace(/```sql/g, "").replace(/```/g, "").trim(); // ✅ cleanup markdown
+  sql = sql.replace(/```sql/g, "").replace(/```/g, "").trim();
   return sql;
 }
 
-// 🧠 POST /ai/query
+// ---------- /ai/query Endpoint ----------
 app.post("/ai/query", async (req, res) => {
   try {
     const { question } = req.body;
     if (!question) return res.status(400).json({ error: "Question is required." });
 
     const sql = await generateSQL(question, schema);
-    console.log("🧠 Cleaned SQL:\n", sql);
+    console.log("🧠 SQL Generated:\n", sql);
 
-    // ✅ Safety check — allow only SELECT
+    // ✅ Safety check
     if (!/^SELECT\s+/i.test(sql)) {
       return res.status(400).json({ error: "Only SELECT queries are allowed" });
     }
 
-    const { data, error } = await supabase.from("PO_Pending").select("*").limit(10);
+    // Execute SQL through Supabase RPC
+    const { data, error } = await supabase.rpc("run_sql", { sql_text: sql });
 
     if (error) throw error;
 
     res.json({
-      summary: `Fetched ${data.length} rows.`,
+      summary: `Fetched ${data?.length || 0} rows.`,
       sql,
       table: data,
     });
@@ -93,6 +98,7 @@ app.post("/ai/query", async (req, res) => {
   }
 });
 
+// ---------- Start Server ----------
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
