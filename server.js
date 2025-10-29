@@ -68,8 +68,8 @@ You are an AI expert in writing PostgreSQL queries.
     The query should work on the given schema.
     {schema}
     --- Querying Rules ---
-    1.  **CRITICAL `UNION` RULE:** When using `UNION` or `UNION ALL`, you **MUST NOT** use `SELECT *`. The tables have different columns and this will cause an error.
-    2.  **HOW TO FIX `UNION`:** You must explicitly list the columns to select. Identify a set of common, meaningful columns (e.g., "Task", "Status", "Assignee", "Priority", "Due_Date"). For tables that are missing one of these columns, you **MUST** select `NULL` and cast it to the appropriate type, aliasing it to the common column name. For example: `SELECT "Task", "Status", NULL::text AS "Assignee" FROM "Checklist"`.
+    1.  **CRITICAL \`UNION\` RULE:** When using \`UNION\` or \`UNION ALL\`, you **MUST NOT** use \`SELECT *\`. The tables have different columns and this will cause an error.
+    2.  **HOW TO FIX \`UNION\`:** You must explicitly list the columns to select. Identify a set of common, meaningful columns (e.g., "Task", "Status", "Assignee", "Priority", "Due_Date"). For tables that are missing one of these columns, you **MUST** select \`NULL\` and cast it to the appropriate type, aliasing it to the common column name. For example: \`SELECT "Task", "Status", NULL::text AS "Assignee" FROM "Checklist"\`.
     3. Use advanced matching techniques, to respond to more flexible queries.
     4. Only give 1 SQL query at a time.
 
